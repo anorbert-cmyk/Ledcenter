@@ -1,0 +1,65 @@
+#!/usr/bin/env sh
+#
+# Ledcenter pre-deploy-production hook
+# - Security audit (security-auditor agent kovetelmenyei)
+# - SEO audit (seo-checker agent kovetelmenyei)
+# - Integration tests (integration-tester agent — Barion + Szamlazz + NAV)
+# - Backup verification (T1.3 G-20: RPO 15p, RTO 4h)
+# - ELLENORIZD-feloldasok ellenorzese (CC-1)
+
+set -e
+
+echo "Pre-deploy production: full audit..."
+
+# 1. Security audit
+echo "=> Security audit"
+if [ -f "tools/ci/security-audit.sh" ]; then
+  ./tools/ci/security-audit.sh
+fi
+
+# 2. SEO audit (Lighthouse + schema)
+echo "=> SEO audit (Lighthouse + schema)"
+if command -v lhci > /dev/null 2>&1; then
+  lhci autorun --collect.url=$STAGING_URL || {
+    echo "FATAL: Lighthouse failed. Fix before production deploy."
+    exit 1
+  }
+fi
+
+# Schema.org validation
+if [ -f "tools/ci/validate-schema-org.sh" ]; then
+  ./tools/ci/validate-schema-org.sh "$STAGING_URL"
+fi
+
+# 3. Integration tests (Barion + Szamlazz + NAV sandbox)
+echo "=> Integration tests (sandbox)"
+if [ -f "package.json" ] && pnpm run --silent test:e2e > /dev/null 2>&1; then
+  pnpm test:e2e
+fi
+
+# 4. Backup verification (G-20 RPO 15p)
+echo "=> Backup verification"
+if [ -f "tools/db/verify-backup.ts" ]; then
+  pnpm tsx tools/db/verify-backup.ts || {
+    echo "FATAL: backup verification failed. RPO at risk."
+    exit 1
+  }
+fi
+
+# 5. ELLENORIZD-feloldasok ellenorzese (CC-1)
+echo "=> ELLENORIZD-feloldasok ellenorzes"
+if [ -f "tools/ci/check-ellenorizd-resolved.sh" ]; then
+  ./tools/ci/check-ellenorizd-resolved.sh || {
+    echo "FATAL: vannak feloldatlan ELLENORIZD-pontok. Lasd docs/checks/."
+    exit 1
+  }
+fi
+
+# 6. Norbi go-ahead?
+echo "=> Norbi explicit go-ahead?"
+if [ "$NORBI_GO_AHEAD" != "yes" ]; then
+  echo "FATAL: Norbi explicit go-ahead-je hianyzik. Set NORBI_GO_AHEAD=yes."
+  exit 1
+fi
+
+echo "All pre-deploy checks: OK."

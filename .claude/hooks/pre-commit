@@ -1,0 +1,96 @@
+#!/usr/bin/env sh
+#
+# Ledcenter pre-commit hook
+# - Research-then-code enforcement (build spec 0.5.1, 0.5.2, 0.5.3)
+# - Lint + typecheck + unit teszt
+# - gitleaks secret scan
+# - Hard-coded AFA + customer impersonation + tilos library lint
+
+set -e
+
+echo "Pre-commit: lint + typecheck + unit tests..."
+
+# Csak akkor futtatjuk a pnpm scriptet, ha a package.json letezik es a scriptek definialva vannak
+if [ -f "package.json" ]; then
+  if pnpm run --silent lint > /dev/null 2>&1; then
+    pnpm lint
+  fi
+  if pnpm run --silent typecheck > /dev/null 2>&1; then
+    pnpm typecheck
+  fi
+  if pnpm run --silent test:unit > /dev/null 2>&1; then
+    pnpm test:unit --bail
+  fi
+fi
+
+echo "Pre-commit: gitleaks scan..."
+if command -v gitleaks > /dev/null 2>&1; then
+  gitleaks detect --source . --staged --redact || {
+    echo "FATAL: gitleaks detected secret in staged changes."
+    exit 1
+  }
+fi
+
+# Hard-coded AFA detection
+echo "Pre-commit: hard-coded AFA check..."
+STAGED_TS=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(ts|tsx|js|jsx)$' || true)
+if [ -n "$STAGED_TS" ]; then
+  if echo "$STAGED_TS" | xargs -I {} grep -lE "(\* ?1\.27|\* ?1\.05|\* ?1\.18|vat:\s?27|vatRate.*= ?27)" {} 2>/dev/null; then
+    echo "FATAL: hard-coded AFA detected. Hasznald a vatRate mezot es a calculatePrice helpert."
+    exit 1
+  fi
+  if echo "$STAGED_TS" | xargs -I {} grep -lE "(impersonate|loginAs|actAsCustomer)" {} 2>/dev/null; then
+    echo "FATAL: customer impersonation tiltva v1-ben (ADR-009)."
+    exit 1
+  fi
+  if echo "$STAGED_TS" | xargs -I {} grep -lE "from ['\"]lodash['\"]|from ['\"]moment['\"]|from ['\"]axios['\"]" {} 2>/dev/null; then
+    echo "FATAL: tilos library detektalva (lodash/moment/axios). Lasd CLAUDE.md."
+    exit 1
+  fi
+fi
+
+# Research-then-code enforcement (0.5.1, 0.5.2, 0.5.3)
+echo "Pre-commit: research-fazis ellenorzes..."
+COMMIT_MSG_FILE="${1:-.git/COMMIT_EDITMSG}"
+if [ -f "$COMMIT_MSG_FILE" ]; then
+  COMMIT_MSG=$(cat "$COMMIT_MSG_FILE")
+else
+  COMMIT_MSG=""
+fi
+
+TASK_ID=$(echo "$COMMIT_MSG" | grep -oE 'T[0-9]+\.[0-9]+' | head -1 || echo "")
+
+if [ -n "$TASK_ID" ]; then
+  # Az understanding (research) commitokat es docs: ADR- commitokat atengedjuk
+  if echo "$COMMIT_MSG" | grep -qE 'understanding|docs: ADR-|docs:|chore:|fix:'; then
+    echo "Pre-commit: research / ADR / chore commit, atengedve."
+  else
+    # Kod-commit — ellenorizzuk, hogy a research-fajlok megvannak
+    if [ ! -f "docs/understanding/${TASK_ID}.md" ]; then
+      echo "FATAL: hianyzik docs/understanding/${TASK_ID}.md"
+      echo "       Fuss: /task ${TASK_ID} eloszor (build spec 0.5.1)."
+      exit 1
+    fi
+
+    # Ha az understanding.md jelzi, hogy ADR-worthy, akkor challenge + ADR is kotelezo
+    if grep -qiE 'ADR-worthy.*igen' "docs/understanding/${TASK_ID}.md"; then
+      if [ ! -f "docs/challenges/${TASK_ID}.md" ]; then
+        echo "FATAL: hianyzik docs/challenges/${TASK_ID}.md (ADR-worthy dontes)."
+        echo "       Fuss: challenger sub-agent eloszor (build spec 0.5.2)."
+        exit 1
+      fi
+      ADR_COUNT=$(ls docs/adr/*-${TASK_ID}-*.md 2>/dev/null | wc -l)
+      if [ "$ADR_COUNT" = "0" ]; then
+        ADR_REF_COUNT=$(grep -l "Kapcsolódó task: ${TASK_ID}" docs/adr/*.md 2>/dev/null | wc -l)
+        if [ "$ADR_REF_COUNT" = "0" ]; then
+          echo "FATAL: hianyzik ADR a ${TASK_ID}-hoz."
+          echo "       Fuss: doc-writer sub-agent eloszor (ADR generalas)."
+          exit 1
+        fi
+      fi
+    fi
+    echo "Pre-commit: research-fajlok OK (${TASK_ID})."
+  fi
+fi
+
+echo "Pre-commit: OK."
